@@ -1,0 +1,222 @@
+---
+title: "analysis"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+bibliography: ./../../references.bib
+---
+
+
+```{r setup, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+knitr::opts_knit$set(root.dir = usethis::proj_path())
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+
+```
+## load pkgs
+```{r}
+library(TCGAbiolinks)
+library(tidyverse)
+library(dplyr)
+library(DT)
+library(SummarizedExperiment)
+```
+
+## set var
+
+```{r}
+library(tidyverse)
+project_id <- "TCGA-LUAD"
+workflow_type <- "HTSeq - FPKM"
+fs::dir_create("analysis/data/raw_data/", project_id)
+fs::dir_create(stringr::str_glue("analysis/data/derived_data/{project_id}"))
+save_path <- str_glue("analysis/data/derived_data/{project_id}/analysis.RData")
+```
+
+
+[Identification of a Sixteen-gene Prognostic Biomarker for Lung Adenocarcinoma Using a Machine Learning Method](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6959071/)
+
+
+
+
+## Materials and Methods
+
+### Data collection and preprocessing
+
+The RNA-Seq data and the corresponding clinical information for LUAD were downloaded from the publicly available TCGA database. After filtering out the missing data, a total of 506 LUAD patients were kept as our study samples. The 506 LUAD patients were further randomly assigned to a training cohort (TCGA cohort I, n = 338) and an internal validation cohort (TCGA cohort II, n = 168).
+
+TCGA ➡ (train: 506 + internal validation: 168)
+
+> TCGA的数据怎么下载? 
+
+### * download TCGA LUAD
+
+![](https://tva1.sinaimg.cn/large/0081Kckwgy1gk7psbn9tcj30mr0730tr.jpg)
+
+[TCGAbiolinks: Downloading and preparing files for analysis](https://bioconductor.org/packages/release/bioc/vignettes/TCGAbiolinks/inst/doc/download_prepare.html#GDCprepare:_Outputs)
+
+
+```{r }
+library(TCGAbiolinks)
+library(tidyverse)
+library(dplyr)
+library(DT)
+library(SummarizedExperiment)
+
+Sys.setenv(http_proxy="http://127.0.0.1:60323")
+Sys.setenv(https_proxy="http://127.0.0.1:60323")
+```
+
+### * download RNA-seq data 
+```{r echo=TRUE, eval=FALSE}
+# Genome of reference: hg38  
+# Accessing GDC.
+query <- GDCquery(
+  project = project_id,
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = workflow_type
+)
+GDCdownload(query, method = "api", files.per.chunk = 100) 
+
+expdat <-
+  GDCprepare(query = query,
+             save = TRUE,
+             save.filename = str_glue("analysis/data/raw_data/{project_id}/expdat.rda"))
+
+RNA_FPKM_matrix <- SummarizedExperiment::assay(expdat)
+RNA_FPKM_matrix[1:4, 1:4]
+
+
+RNA_FPKM_matrix_log2 <- 
+  RNA_FPKM_matrix %>% 
+  #RNA_FPKM_matrix[1:4, 1:4] %>% 
+  `+`(1) %>% 
+  log2()
+
+write.csv(
+  RNA_FPKM_matrix %>% 
+    as.data.frame() %>% 
+    tibble::rowid_to_column("gene") %>% select(gene, everything()),
+  file = str_glue("analysis/data/raw_data/{project_id}/RNA_FPKM_matrix.csv"),
+  row.names = FALSE
+)
+```
+
+### * download clincal infomation
+
+```{r echo=TRUE, eval=FALSE}
+#Parse XML clinical data
+#Genome of reference: hg38
+cli_query <- GDCquery(project = project_id,
+                      data.category = "Clinical",
+                      file.type = "xml")
+
+GDCdownload(cli_query)
+
+clinical <- GDCprepare_clinic(cli_query, clinical.info = "patient")
+nrow(clinical) 
+write.csv(
+  clinical,
+  file = str_glue("analysis/data/raw_data/{project_id}/clincal_info.csv")
+)
+
+```
+
+### 📌  [RPKM, FPKM and TPM, clearly explained | RNA-Seq Blog](https://rna-seqblog.com/rpkm-fpkm-and-tpm-clearly-explained/)
+
+1. Count up the total reads in a sample and divide that number by 1,000,000 – this is our “per million” scaling factor.
+2. Divide the read counts by the “per million” scaling factor. This normalizes for **sequencing depth**, giving you reads per million (RPM)
+3. Divide the RPM values by the **length of the gene**, in kilobases. This gives you RPKM.
+
+
+RPKM and FPKM:  1 ➡ 2 ➡ 3
+
+TPM:  3 ➡ 1 ➡ 2
+
+### * GEO
+Moreover, the other two **external validation** cohorts consisting of **393** and **149** LUAD patients were downloaded from the GEO database ([GSE72094](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE72094) cohort, [GSE11969](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE11969) cohort). 
+
+
+In the RNA-Seq dataset for the above four cohorts, the numerical distribution of Reads **per Kilo-base per Million mapped (RPKM)** reads are too wide to be used in model analysis, thus we formulated each RPKM value in $\log 2(\mathrm{X}+1)$, where _X_ is the RPKM value[@luoPrognostic4lncRNAExpression2018].
+
+### Survival-related seed genes generation
+
+The association between genes and patients' overall survival was analyzed in the TCGA cohort I. The survival-related seed genes were screened and identified from all the genes using the following two models.
+
+All the genes among the TCGA cohort I were included in the **Cox univariate** survival analysis by the **“survival” R package**, the genes with expressing significance p values less than 0.05 were extracted as the first group of survival-related seed genes. The Cox model is a traditional method in the biostatistical field. 
+
+In addition, the **RSF model** in machine learning field was used to select the second group of survival-related seed genes from all the genes among the TCGA cohort I again, which was built by the **“randomForestSRC” R** package.
+
+To search the key pathways that were associated with LUAD survival, we next performed the KEGG pathway enrichment analysis for the two sets of survival-related seed genes by using the Database for Annotation, Visualization and Integrated Discovery (DAVID) 
+
+
+## Results
+
+### part 01
+
+1. The overall flowchart of this work was summarized in Fig. [Fig.1A.1](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6959071/figure/F1/)A. 
+
+2. Firstly, the **Cox model** and the **RSF model** were used to **screen** each one group of **survival-related seed genes** from all the genes in the TCGA cohort I, 
+
+3. and then the **forward selection model** employed the seed genes or the clinically-integrated seed genes to select four sets of prognosis-related key genes.
+
+4. Finally, the TCGA cohort II, the [GSE72094](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE72094) cohort and the [GSE11969](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE11969) cohort were used to **verify the performance of the four sets of prognosis-related key genes.**
+
+![](https://tva1.sinaimg.cn/large/0081Kckwly1gk7r5n7fj8j30wa0i2wk2.jpg)
+
+
+> Identification of prognostic gene signature. 
+
+A) Flowchart of RNA-Seq analysis and signature generation. Briefly, survival-related seed genes of the 506 TCGA LUAD patients were first identified by the Cox model and the machine learning model (random survival forest, RSF) from the TCGA cohort I. Next the forward selection model was used to select four sets of key genes for prognosis prediction. The survival risk score systems were built based on the expression data of gene signatures in the TCGA cohort II and the GSE72094 cohort and the GSE11969 cohort, which divided patients into high- and low-risk groups. 
+
+B) KEGG enrichment pathway analysis of 5376 survival-related seed genes obtained by the Cox model. 
+
+C) KEGG enrichment pathway analysis of 1113 survival-related seed genes obtained by the RSF model. 
+
+D) The venn diagram showed that the common key genes obtained from RNA-Seq data and clinically-integrated RNA-Seq data using both the Cox model and the RSF model.
+
+
+#### 📌  Cox univariate
+```{r}
+res <- tabSurvKM <- 
+  TCGAanalyze_SurvivalKM(
+  clinical_patient = distinct(clinical),
+  RNA_FPKM_matrix_log2,
+  Genelist = rownames(RNA_FPKM_matrix_log2),
+  Survresult = TRUE,
+  p.cut = 0.05,
+  ThreshTop = 0.5,
+  ThreshDown = 0.5
+)
+```
+
+#### 📌  RSF model
+
+```{r}
+
+```
+
+
+## save and load
+
+```{r echo=TRUE, eval=FALSE}
+save.image(save_path)
+
+
+load(save_path)
+```
+
+
+## References
